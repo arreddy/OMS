@@ -74,7 +74,10 @@ public class TaskService {
         task.setAssigneeId(userId);
         task.setStatus(TaskStatus.ASSIGNED);
         task.setClaimedAt(OffsetDateTime.now());
-        task = taskRepository.save(task);
+        // saveAndFlush (not save): Hibernate only bumps @Version in memory when the
+        // UPDATE actually executes, which a plain save() on an already-managed entity
+        // defers until commit — the caller would read back the pre-bump version.
+        task = taskRepository.saveAndFlush(task);
         recordAssigned(task);
         return task;
     }
@@ -87,7 +90,7 @@ public class TaskService {
         task.setAssigneeId(assigneeId);
         task.setStatus(TaskStatus.ASSIGNED);
         task.setClaimedAt(OffsetDateTime.now());
-        task = taskRepository.save(task);
+        task = taskRepository.saveAndFlush(task);
         recordAssigned(task);
         return task;
     }
@@ -103,7 +106,7 @@ public class TaskService {
         task.setDecisionBy(actor);
         task.setStatus(TaskStatus.APPROVED);
         task.setCompletedAt(OffsetDateTime.now());
-        task = taskRepository.save(task);
+        task = taskRepository.saveAndFlush(task);
 
         workflowEngineService.fireTaskDecision(task, TaskDecision.APPROVE, actor, comment);
 
@@ -123,7 +126,7 @@ public class TaskService {
         task.setDecisionBy(actor);
         task.setStatus(TaskStatus.REJECTED);
         task.setCompletedAt(OffsetDateTime.now());
-        task = taskRepository.save(task);
+        task = taskRepository.saveAndFlush(task);
 
         workflowEngineService.fireTaskDecision(task, TaskDecision.REJECT, actor, reason);
 
@@ -138,7 +141,7 @@ public class TaskService {
         requireVersionMatch(task, expectedVersion);
         requireOpen(task);
         task.setStatus(TaskStatus.ESCALATED);
-        task = taskRepository.save(task);
+        task = taskRepository.saveAndFlush(task);
         recordEscalated(task);
         return task;
     }

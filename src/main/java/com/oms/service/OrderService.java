@@ -120,7 +120,10 @@ public class OrderService {
             order.setAttributes(command.attributes());
         }
         order.setUpdatedBy(actor);
-        order = orderRepository.save(order);
+        // saveAndFlush: this order is already managed (re-fetched, not newly inserted),
+        // so a plain save() defers the UPDATE — and the @Version bump — until commit;
+        // the version returned in the response would otherwise be stale by one.
+        order = orderRepository.saveAndFlush(order);
 
         eventOutboxService.record("order.updated", AggregateType.ORDER, order.getOrderId(),
                 Map.of("orderId", order.getOrderId().toString(), "occurredAt", OffsetDateTime.now().toString(),
@@ -166,7 +169,7 @@ public class OrderService {
             schemaValidationService.validate(orderType.getLineAttributeSchema(), command.attributes());
             line.setAttributes(command.attributes());
         }
-        return orderLineRepository.save(line);
+        return orderLineRepository.saveAndFlush(line);
     }
 
     private OrderLine buildLine(Order order, OrderType orderType, int lineNumber, CreateLineCommand command) {

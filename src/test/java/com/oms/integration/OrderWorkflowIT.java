@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -80,10 +81,7 @@ class OrderWorkflowIT {
         WorkflowInstanceResponse workflow = fireTransition(order.orderId(), TriggerType.EVENT, "order.submitted");
         assertThat(workflow.currentState()).isEqualTo("CREDIT_REVIEW");
 
-        ResponseEntity<TaskResponse[]> tasksResponse = rest.getForEntity(
-                "/tasks?status=UNASSIGNED&assigneeGroup=credit-team", TaskResponse[].class);
-        assertThat(tasksResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
-        List<TaskResponse> tasks = List.of(tasksResponse.getBody());
+        List<TaskResponse> tasks = queryTasks("status=UNASSIGNED&assigneeGroup=credit-team");
         TaskResponse task = tasks.stream().filter(t -> t.orderId().equals(order.orderId())).findFirst().orElseThrow();
         assertThat(task.taskType()).isEqualTo("CREDIT_REVIEW");
         assertThat(task.status().name()).isEqualTo("UNASSIGNED");
@@ -104,9 +102,8 @@ class OrderWorkflowIT {
         OrderResponse order = createOrder(new BigDecimal("9000.00"));
         fireTransition(order.orderId(), TriggerType.EVENT, "order.submitted");
 
-        ResponseEntity<TaskResponse[]> tasksResponse = rest.getForEntity(
-                "/tasks?status=UNASSIGNED&assigneeGroup=credit-team", TaskResponse[].class);
-        TaskResponse task = List.of(tasksResponse.getBody()).stream()
+        List<TaskResponse> tasks = queryTasks("status=UNASSIGNED&assigneeGroup=credit-team");
+        TaskResponse task = tasks.stream()
                 .filter(t -> t.orderId().equals(order.orderId())).findFirst().orElseThrow();
 
         TaskResponse rejected = reject(task.taskId(), task.version(), "fraud risk");
@@ -190,5 +187,17 @@ class OrderWorkflowIT {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         return headers;
+    }
+
+    /** GET /tasks returns a Spring Data Page<TaskResponse> JSON object, not a bare array. */
+    private List<TaskResponse> queryTasks(String query) {
+        ResponseEntity<PageEnvelope<TaskResponse>> response = rest.exchange("/tasks?" + query, HttpMethod.GET, null,
+                new ParameterizedTypeReference<PageEnvelope<TaskResponse>>() {
+                });
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        return response.getBody().content();
+    }
+
+    private record PageEnvelope<T>(List<T> content) {
     }
 }

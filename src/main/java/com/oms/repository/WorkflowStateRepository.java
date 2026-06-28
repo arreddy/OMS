@@ -9,7 +9,7 @@ import java.util.UUID;
 
 public interface WorkflowStateRepository extends JpaRepository<WorkflowState, UUID> {
 
-    Optional<WorkflowState> findByWorkflowDefinition_WorkflowDefinitionIdAndIsInitialTrue(UUID workflowDefinitionId);
+    Optional<WorkflowState> findByWorkflowDefinition_WorkflowDefinitionIdAndInitialTrue(UUID workflowDefinitionId);
 
     Optional<WorkflowState> findByWorkflowDefinition_WorkflowDefinitionIdAndCode(UUID workflowDefinitionId, String code);
 

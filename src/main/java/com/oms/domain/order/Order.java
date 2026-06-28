@@ -42,6 +42,7 @@ public class Order {
     @Column(name = "customer_ref", length = 100)
     private String customerRef;
 
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "currency", nullable = false, columnDefinition = "char(3)")
     private String currency;
 

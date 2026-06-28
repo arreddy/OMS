@@ -81,7 +81,7 @@ public class WorkflowEngineService {
             throw new IllegalStateException("Order type " + orderType.getCode() + " has no published workflow");
         }
         WorkflowState initial = workflowStateRepository
-                .findByWorkflowDefinition_WorkflowDefinitionIdAndIsInitialTrue(definition.getWorkflowDefinitionId())
+                .findByWorkflowDefinition_WorkflowDefinitionIdAndInitialTrue(definition.getWorkflowDefinitionId())
                 .orElseThrow(() -> new IllegalStateException(
                         "Workflow definition " + definition.getWorkflowDefinitionId() + " has no initial state"));
 

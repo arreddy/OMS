@@ -97,6 +97,7 @@ There is no `is_active` flag on this table. "Active version for an order type" i
 | state_type | ENUM | `AUTOMATIC` \| `MANUAL` \| `WAIT` |
 | is_initial | BOOLEAN | |
 | is_terminal | BOOLEAN | |
+| default_assignee_group | VARCHAR(100), nullable | Only meaningful when `state_type = MANUAL`. §5.3 step 1 says a task is created with "assignee_group from state config" — this is that config; the original table omitted it. |
 
 - **AUTOMATIC**: a state the engine expects to resolve immediately. On entry, the engine evaluates outbound transitions in `sequence` order (see §4.3) and fires the first one whose `trigger_code` is null (or matches an already-queued signal) and whose `guard_expression` is true or null. A signal (`EVENT`/`API_ACTION`/`TIMER`) arriving later re-runs the same evaluation. A stuck `AUTOMATIC` state (no eligible transition for an extended period) indicates a missing event or engine bug, not expected behavior.
 - **MANUAL**: on entry, a `task` row is created automatically (see §5). Exit requires a task decision (`TASK_APPROVED`/`TASK_REJECTED`).
