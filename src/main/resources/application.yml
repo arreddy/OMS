@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: oms-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/oms
+    username: oms
+    password: oms
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.oms: INFO
+
+oms:
+  outbox:
+    publish-interval-ms: 5000
+  task:
+    sla-sweep-interval-ms: 30000
+    default-priority: 5
+    default-sla-hours: 24
