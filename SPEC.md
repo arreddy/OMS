@@ -98,6 +98,10 @@ There is no `is_active` flag on this table. "Active version for an order type" i
 | is_initial | BOOLEAN | |
 | is_terminal | BOOLEAN | |
 | default_assignee_group | VARCHAR(100), nullable | Only meaningful when `state_type = MANUAL`. §5.3 step 1 says a task is created with "assignee_group from state config" — this is that config; the original table omitted it. |
+| is_customer_visible | BOOLEAN, default FALSE | Drives the Customer Portal timeline (UI spec §3): only states with this set render there. Internal-only states (e.g. `CREDIT_REVIEW`) stay off it. |
+| customer_facing_label | VARCHAR(200), nullable | Plain-language status shown to customers, set independently of `code` so internal renames never break customer-facing copy (UI spec §3, §4.2). |
+| terminal_outcome | ENUM, nullable | `SUCCESS` \| `FAILURE`. Only set when `is_terminal = TRUE` (enforced by a CHECK constraint) — `is_terminal` alone doesn't say which side of the outcome a terminal state is on (UI spec §6 badge mapping needs this). |
+| canvas_x / canvas_y | NUMERIC(10,2), nullable | Workflow Designer node layout (UI spec §4.3) — a pure display hint, no engine meaning. |
 
 - **AUTOMATIC**: a state the engine expects to resolve immediately. On entry, the engine evaluates outbound transitions in `sequence` order (see §4.3) and fires the first one whose `trigger_code` is null (or matches an already-queued signal) and whose `guard_expression` is true or null. A signal (`EVENT`/`API_ACTION`/`TIMER`) arriving later re-runs the same evaluation. A stuck `AUTOMATIC` state (no eligible transition for an extended period) indicates a missing event or engine bug, not expected behavior.
 - **MANUAL**: on entry, a `task` row is created automatically (see §5). Exit requires a task decision (`TASK_APPROVED`/`TASK_REJECTED`).
@@ -197,6 +201,7 @@ If a future order type needs genuinely independent per-line approval workflows (
 | decision | ENUM, nullable | `APPROVE` \| `REJECT` |
 | decision_reason | TEXT, nullable | |
 | decision_by | VARCHAR(100), nullable | |
+| escalation_reason | TEXT, nullable | Set on escalate — by a manual override (UI spec §2.4, required from that path) or the SLA sweep job (step 4 below, which fills in a system-generated reason). Distinct from `decision_reason`, which is APPROVE/REJECT-specific. |
 | created_at / claimed_at / completed_at | TIMESTAMPTZ | |
 | version | BIGINT | |
 
@@ -227,7 +232,7 @@ If a future order type needs genuinely independent per-line approval workflows (
 |---|---|---|
 | POST | `/orders` | Create order; validates `attributes` against `order_type.attribute_schema` |
 | GET | `/orders/{id}` | Fetch order + lines |
-| GET | `/orders?status=&order_type=&customer_ref=` | List/filter |
+| GET | `/orders?status=&order_type=&customer_ref=&created_from=&created_to=&has_open_task=` | List/filter. `status` and `order_type` are multi-select (repeat the param or comma-separate); `has_open_task` filters on whether any non-terminal `task` exists for the order — needed for the Ops order list's toggle (UI spec §2.1). |
 | PATCH | `/orders/{id}` | Update core fields/attributes; requires `If-Match: version` |
 | POST | `/orders/{id}/lines` | Add line |
 | PATCH | `/orders/{id}/lines/{lineId}` | Update line |
@@ -239,7 +244,8 @@ If a future order type needs genuinely independent per-line approval workflows (
 | GET | `/order-types` | List active types |
 | GET | `/order-types/{code}/schema` | Returns `attribute_schema`, `line_attribute_schema`, active workflow summary |
 | POST | `/order-types` | Register new type (admin) |
-| PUT | `/order-types/{code}/workflow` | Publish a new workflow version: inserts a new `workflow_definition` row, then updates `order_type.workflow_definition_id` to point at it — both in one transaction (§4.1). In-flight `workflow_instance` rows keep their previously pinned `workflow_definition_id`. |
+| PATCH | `/order-types/{code}` | `{attribute_schema?, line_attribute_schema?}` — extends an existing type's schema (either field optional, independently updatable). Enforces §3.3's "no DDL, no deploy" promise for fields added *after* the type already exists, not just at creation. Never retroactively validates already-stored `order.attributes` against the new schema. |
+| PUT | `/order-types/{code}/workflow` | Publish a new workflow version: inserts a new `workflow_definition` row, then updates `order_type.workflow_definition_id` to point at it — both in one transaction (§4.1). In-flight `workflow_instance` rows keep their previously pinned `workflow_definition_id`. Rejects the publish (`400`) unless: every state is reachable from the initial state, every non-terminal state has at least one outbound transition, and every `MANUAL` state has both a `TASK_APPROVED` and a `TASK_REJECTED` transition — this is what backs the Workflow Designer's "Publish disabled until validation passes" (UI spec §4.3) so a direct API call can't bypass it either. |
 
 ### Workflow
 
@@ -253,13 +259,13 @@ If a future order type needs genuinely independent per-line approval workflows (
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/tasks?status=UNASSIGNED&assignee_group=&order_type=` | Queue view |
+| GET | `/tasks?status=UNASSIGNED&assignee_group=&order_type=&assignee_id=&priority=` | Queue view. `assignee_id` backs the Ops "My tasks" toggle (UI spec §2.3). |
 | GET | `/tasks/{id}` | Task detail + comments |
 | POST | `/tasks/{id}/claim` | Self-assign |
 | POST | `/tasks/{id}/assign` | `{assignee_id}` — assign to a user |
 | POST | `/tasks/{id}/approve` | `{comment}` — fires `TASK_APPROVED` |
 | POST | `/tasks/{id}/reject` | `{reason}` — fires `TASK_REJECTED` |
-| POST | `/tasks/{id}/escalate` | Manual escalation override |
+| POST | `/tasks/{id}/escalate` | `{reason}` (required, `400` if blank) — manual escalation override, distinct from the automatic SLA-breach escalation in §5.3 step 4, which fills in its own system-generated reason |
 | POST | `/tasks/{id}/comments` | Add comment |
 
 All mutating endpoints require `version`/`If-Match` for optimistic concurrency and return `409 Conflict` on mismatch.

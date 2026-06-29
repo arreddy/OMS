@@ -29,4 +29,18 @@ public interface TaskRepository extends JpaRepository<Task, UUID>, JpaSpecificat
         return (root, query, cb) -> orderTypeCode == null ? null
                 : cb.equal(root.get("order").get("orderTypeCode"), orderTypeCode);
     }
+
+    /** Backs the "My tasks" toggle (UI spec §2.3) — caller passes the current user's ID. */
+    static Specification<Task> hasAssigneeId(String assigneeId) {
+        return (root, query, cb) -> assigneeId == null ? null : cb.equal(root.get("assigneeId"), assigneeId);
+    }
+
+    static Specification<Task> hasPriority(Short priority) {
+        return (root, query, cb) -> priority == null ? null : cb.equal(root.get("priority"), priority);
+    }
+
+    /** Backs Order Detail's "awaiting task" card (UI spec §2.2) — finds the task(s) for one order. */
+    static Specification<Task> hasOrderId(UUID orderId) {
+        return (root, query, cb) -> orderId == null ? null : cb.equal(root.get("order").get("orderId"), orderId);
+    }
 }

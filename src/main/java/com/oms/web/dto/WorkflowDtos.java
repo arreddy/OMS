@@ -1,8 +1,10 @@
 package com.oms.web.dto;
 
 import com.oms.domain.workflow.StateType;
+import com.oms.domain.workflow.TerminalOutcome;
 import com.oms.domain.workflow.TriggerType;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -29,13 +31,17 @@ public final class WorkflowDtos {
                                       String triggerCode, String triggeredBy, String comment, OffsetDateTime occurredAt) {
     }
 
-    public record WorkflowInstanceResponse(UUID instanceId, UUID orderId, String currentState, boolean terminal,
-                                            List<TransitionOption> validNextTransitions,
+    public record WorkflowInstanceResponse(UUID instanceId, UUID orderId, UUID workflowDefinitionId, String currentState,
+                                            boolean terminal, List<TransitionOption> validNextTransitions,
                                             List<TransitionLogEntry> history) {
     }
 
+    public record WorkflowVersionSummary(UUID workflowDefinitionId, int version, String name, OffsetDateTime publishedAt) {
+    }
+
     public record StateResponse(UUID stateId, String code, StateType stateType, boolean initial, boolean terminal,
-                                 String defaultAssigneeGroup) {
+                                 String defaultAssigneeGroup, boolean customerVisible, String customerFacingLabel,
+                                 TerminalOutcome terminalOutcome, BigDecimal canvasX, BigDecimal canvasY) {
     }
 
     public record TransitionResponse(UUID transitionId, String fromStateCode, String toStateCode, int sequence,

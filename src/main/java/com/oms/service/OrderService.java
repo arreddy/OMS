@@ -17,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -50,11 +51,15 @@ public class OrderService {
                 .orElseThrow(() -> new NotFoundException("No order with id " + orderId));
     }
 
-    public Page<Order> listOrders(String status, String orderTypeCode, String customerRef, Pageable pageable) {
+    public Page<Order> listOrders(List<String> statuses, List<String> orderTypeCodes, String customerRef,
+                                   OffsetDateTime createdFrom, OffsetDateTime createdTo, Boolean hasOpenTask,
+                                   Pageable pageable) {
         Specification<Order> spec = Specification.allOf(
-                OrderRepository.hasStatus(status),
-                OrderRepository.hasOrderTypeCode(orderTypeCode),
-                OrderRepository.hasCustomerRef(customerRef));
+                OrderRepository.hasStatusIn(statuses),
+                OrderRepository.hasOrderTypeCodeIn(orderTypeCodes),
+                OrderRepository.hasCustomerRef(customerRef),
+                OrderRepository.createdBetween(createdFrom, createdTo),
+                OrderRepository.hasOpenTask(hasOpenTask));
         return orderRepository.findAll(spec, pageable);
     }
 

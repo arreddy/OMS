@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.math.BigDecimal;
 import java.util.UUID;
 
 /** SPEC.md §4.2. */
@@ -40,4 +41,29 @@ public class WorkflowState {
     /** Default assignee_group for tasks created on entry to this state, when state_type = MANUAL. */
     @Column(name = "default_assignee_group", length = 100)
     private String defaultAssigneeGroup;
+
+    /** Drives the Customer Portal timeline (UI spec §3) — internal-only states stay off it. */
+    @Column(name = "is_customer_visible", nullable = false)
+    private boolean customerVisible;
+
+    /** Plain-language status shown to customers, independent of `code` (UI spec §3, §4.2). */
+    @Column(name = "customer_facing_label", length = 200)
+    private String customerFacingLabel;
+
+    /** Only set when terminal = true — see chk_terminal_outcome_consistency. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "terminal_outcome", length = 10)
+    private TerminalOutcome terminalOutcome;
+
+    /** Workflow Designer canvas position (UI spec §4.3) — purely a layout hint, no engine meaning. */
+    @Column(name = "canvas_x", precision = 10, scale = 2)
+    private BigDecimal canvasX;
+
+    @Column(name = "canvas_y", precision = 10, scale = 2)
+    private BigDecimal canvasY;
+
+    /** Derived, not persisted — see BadgeCategory. */
+    public BadgeCategory getBadgeCategory() {
+        return BadgeCategory.of(stateType, terminal, terminalOutcome);
+    }
 }

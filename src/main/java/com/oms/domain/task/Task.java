@@ -66,6 +66,10 @@ public class Task {
     @Column(name = "decision_by", length = 100)
     private String decisionBy;
 
+    /** Set on escalate — by a manual override (UI spec §2.4) or the SLA sweep job (SPEC.md §5.3 step 4). */
+    @Column(name = "escalation_reason")
+    private String escalationReason;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;

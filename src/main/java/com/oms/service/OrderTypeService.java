@@ -3,6 +3,7 @@ package com.oms.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oms.domain.order.OrderType;
 import com.oms.domain.workflow.StateType;
+import com.oms.domain.workflow.TerminalOutcome;
 import com.oms.domain.workflow.TriggerType;
 import com.oms.domain.workflow.WorkflowDefinition;
 import com.oms.domain.workflow.WorkflowState;
@@ -15,10 +16,16 @@ import com.oms.repository.WorkflowTransitionRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /** SPEC.md §3.3 registry + §4.1/§6 workflow publishing. */
 @Service
@@ -69,6 +76,27 @@ public class OrderTypeService {
     }
 
     /**
+     * Extends an existing order type's schema (SPEC.md §3.3: "adding... new
+     * custom fields means inserting/updating a row here — no DDL, no
+     * deploy"). Either schema is optional so callers can update just one.
+     * Doesn't touch any already-stored order.attributes — schema validation
+     * only happens at write time, never retroactively (UI-SPEC.md §4.2).
+     */
+    @Transactional
+    public OrderType updateSchema(String code, String attributeSchemaJson, String lineAttributeSchemaJson) {
+        OrderType orderType = getByCode(code);
+        if (attributeSchemaJson != null) {
+            assertValidJson(attributeSchemaJson, "attribute_schema");
+            orderType.setAttributeSchema(attributeSchemaJson);
+        }
+        if (lineAttributeSchemaJson != null) {
+            assertValidJson(lineAttributeSchemaJson, "line_attribute_schema");
+            orderType.setLineAttributeSchema(lineAttributeSchemaJson);
+        }
+        return orderTypeRepository.save(orderType);
+    }
+
+    /**
      * Publishes a new workflow_definition version and atomically repoints
      * order_type.workflow_definition_id at it (SPEC.md §4.1) — the single
      * source of truth for "the active version" of this order type. Existing
@@ -78,11 +106,7 @@ public class OrderTypeService {
     @Transactional
     public WorkflowDefinition publishWorkflow(String orderTypeCode, PublishWorkflowCommand command) {
         OrderType orderType = getByCode(orderTypeCode);
-
-        long initialCount = command.states().stream().filter(StateSpec::initial).count();
-        if (initialCount != 1) {
-            throw new IllegalArgumentException("Workflow definition must have exactly one initial state, found " + initialCount);
-        }
+        validateGraph(command);
 
         int nextVersion = workflowDefinitionRepository.findMaxVersion(orderTypeCode) + 1;
         WorkflowDefinition definition = new WorkflowDefinition();
@@ -101,6 +125,11 @@ public class OrderTypeService {
             state.setInitial(spec.initial());
             state.setTerminal(spec.terminal());
             state.setDefaultAssigneeGroup(spec.defaultAssigneeGroup());
+            state.setCustomerVisible(spec.customerVisible());
+            state.setCustomerFacingLabel(spec.customerFacingLabel());
+            state.setTerminalOutcome(spec.terminalOutcome());
+            state.setCanvasX(spec.canvasX());
+            state.setCanvasY(spec.canvasY());
             statesByCode.put(spec.code(), workflowStateRepository.save(state));
         }
 
@@ -126,6 +155,80 @@ public class OrderTypeService {
         return definition;
     }
 
+    /**
+     * Backs the Workflow Designer's "Publish disabled until validation passes"
+     * promise (UI spec §4.3) server-side, so a direct API call can't publish a
+     * broken graph either: every state reachable from the initial state, every
+     * non-terminal state has at least one outbound transition, and every
+     * MANUAL state has both a TASK_APPROVED and a TASK_REJECTED transition.
+     */
+    private void validateGraph(PublishWorkflowCommand command) {
+        List<StateSpec> states = command.states();
+        List<TransitionSpec> transitions = command.transitions();
+        Set<String> stateCodes = states.stream().map(StateSpec::code).collect(Collectors.toSet());
+
+        long initialCount = states.stream().filter(StateSpec::initial).count();
+        if (initialCount != 1) {
+            throw new IllegalArgumentException("Workflow definition must have exactly one initial state, found " + initialCount);
+        }
+        String initialCode = states.stream().filter(StateSpec::initial).findFirst().orElseThrow().code();
+
+        // Mirrors chk_terminal_outcome_consistency — catching this here gives a clean 400
+        // instead of letting a mismatched payload fail as a raw DB constraint violation.
+        List<String> terminalOutcomeMismatches = states.stream()
+                .filter(s -> s.terminal() == (s.terminalOutcome() == null))
+                .map(StateSpec::code)
+                .toList();
+        if (!terminalOutcomeMismatches.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "terminal_outcome must be set if and only if the state is terminal: " + terminalOutcomeMismatches);
+        }
+
+        Map<String, List<TransitionSpec>> outboundByCode = transitions.stream()
+                .collect(Collectors.groupingBy(TransitionSpec::fromStateCode));
+
+        Set<String> reachable = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
+        reachable.add(initialCode);
+        queue.add(initialCode);
+        while (!queue.isEmpty()) {
+            for (TransitionSpec t : outboundByCode.getOrDefault(queue.poll(), List.of())) {
+                if (reachable.add(t.toStateCode())) {
+                    queue.add(t.toStateCode());
+                }
+            }
+        }
+        Set<String> unreachable = new HashSet<>(stateCodes);
+        unreachable.removeAll(reachable);
+        if (!unreachable.isEmpty()) {
+            throw new IllegalArgumentException("States unreachable from initial state '" + initialCode + "': " + unreachable);
+        }
+
+        List<String> deadEnds = states.stream()
+                .filter(s -> !s.terminal())
+                .map(StateSpec::code)
+                .filter(code -> outboundByCode.getOrDefault(code, List.of()).isEmpty())
+                .toList();
+        if (!deadEnds.isEmpty()) {
+            throw new IllegalArgumentException("Non-terminal states with no outbound transition: " + deadEnds);
+        }
+
+        List<String> incompleteManualStates = states.stream()
+                .filter(s -> s.stateType() == StateType.MANUAL)
+                .map(StateSpec::code)
+                .filter(code -> {
+                    List<TransitionSpec> outbound = outboundByCode.getOrDefault(code, List.of());
+                    boolean hasApprove = outbound.stream().anyMatch(t -> t.triggerType() == TriggerType.TASK_APPROVED);
+                    boolean hasReject = outbound.stream().anyMatch(t -> t.triggerType() == TriggerType.TASK_REJECTED);
+                    return !(hasApprove && hasReject);
+                })
+                .toList();
+        if (!incompleteManualStates.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "MANUAL states missing a TASK_APPROVED and/or TASK_REJECTED transition: " + incompleteManualStates);
+        }
+    }
+
     private WorkflowState requireState(Map<String, WorkflowState> statesByCode, String code) {
         WorkflowState state = statesByCode.get(code);
         if (state == null) {
@@ -142,7 +245,9 @@ public class OrderTypeService {
         }
     }
 
-    public record StateSpec(String code, StateType stateType, boolean initial, boolean terminal, String defaultAssigneeGroup) {
+    public record StateSpec(String code, StateType stateType, boolean initial, boolean terminal,
+                             String defaultAssigneeGroup, boolean customerVisible, String customerFacingLabel,
+                             TerminalOutcome terminalOutcome, BigDecimal canvasX, BigDecimal canvasY) {
     }
 
     public record TransitionSpec(String fromStateCode, String toStateCode, int sequence, TriggerType triggerType,

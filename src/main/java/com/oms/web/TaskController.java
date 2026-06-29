@@ -36,8 +36,11 @@ public class TaskController {
     public Page<TaskResponse> list(@RequestParam(required = false) TaskStatus status,
                                     @RequestParam(required = false) String assigneeGroup,
                                     @RequestParam(required = false) String orderType,
+                                    @RequestParam(required = false) String assigneeId,
+                                    @RequestParam(required = false) Short priority,
+                                    @RequestParam(required = false) UUID orderId,
                                     Pageable pageable) {
-        return taskService.listTasks(status, assigneeGroup, orderType, pageable).map(this::toResponse);
+        return taskService.listTasks(status, assigneeGroup, orderType, assigneeId, priority, orderId, pageable).map(this::toResponse);
     }
 
     @GetMapping("/{id}")
@@ -90,16 +93,17 @@ public class TaskController {
 
     @PostMapping("/{id}/escalate")
     @Transactional
-    public TaskResponse escalate(@PathVariable UUID id, @RequestHeader("If-Match") long ifMatch,
+    public TaskResponse escalate(@PathVariable UUID id, @RequestBody EscalateRequest request,
+                                  @RequestHeader("If-Match") long ifMatch,
                                   @RequestHeader(value = "X-User-Id", defaultValue = "system") String actor) {
-        return toResponse(taskService.escalate(id, ifMatch, actor));
+        return toResponse(taskService.escalate(id, ifMatch, actor, request.reason()));
     }
 
     private TaskResponse toResponse(Task task) {
         return new TaskResponse(task.getTaskId(), task.getOrder().getOrderId(), task.getWorkflowInstance().getInstanceId(),
                 task.getTaskType(), task.getStatus(), task.getAssigneeId(), task.getAssigneeGroup(), task.getPriority(),
                 task.getSlaDueAt(), task.getDecision(), task.getDecisionReason(), task.getDecisionBy(),
-                task.getCreatedAt(), task.getClaimedAt(), task.getCompletedAt(), task.getVersion());
+                task.getEscalationReason(), task.getCreatedAt(), task.getClaimedAt(), task.getCompletedAt(), task.getVersion());
     }
 
     private TaskCommentResponse toCommentResponse(TaskComment comment) {

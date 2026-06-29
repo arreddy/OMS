@@ -44,11 +44,15 @@ public class TaskService {
         return taskRepository.findById(taskId).orElseThrow(() -> new NotFoundException("No task with id " + taskId));
     }
 
-    public Page<Task> listTasks(TaskStatus status, String assigneeGroup, String orderTypeCode, Pageable pageable) {
+    public Page<Task> listTasks(TaskStatus status, String assigneeGroup, String orderTypeCode, String assigneeId,
+                                 Short priority, UUID orderId, Pageable pageable) {
         Specification<Task> spec = Specification.allOf(
                 TaskRepository.hasStatus(status),
                 TaskRepository.hasAssigneeGroup(assigneeGroup),
-                TaskRepository.hasOrderTypeCode(orderTypeCode));
+                TaskRepository.hasOrderTypeCode(orderTypeCode),
+                TaskRepository.hasAssigneeId(assigneeId),
+                TaskRepository.hasPriority(priority),
+                TaskRepository.hasOrderId(orderId));
         return taskRepository.findAll(spec, pageable);
     }
 
@@ -136,11 +140,15 @@ public class TaskService {
     }
 
     @Transactional
-    public Task escalate(UUID taskId, long expectedVersion, String actor) {
+    public Task escalate(UUID taskId, long expectedVersion, String actor, String reason) {
+        if (reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("A manual escalation requires a reason");
+        }
         Task task = getTask(taskId);
         requireVersionMatch(task, expectedVersion);
         requireOpen(task);
         task.setStatus(TaskStatus.ESCALATED);
+        task.setEscalationReason(reason);
         task = taskRepository.saveAndFlush(task);
         recordEscalated(task);
         return task;
@@ -161,6 +169,7 @@ public class TaskService {
             task.setStatus(TaskStatus.ESCALATED);
             task.setAssigneeId(null);
             task.setPriority((short) Math.max(0, task.getPriority() - 1));
+            task.setEscalationReason("SLA breach: not actioned by " + task.getSlaDueAt());
             taskRepository.save(task);
             recordEscalated(task);
         }
@@ -188,6 +197,7 @@ public class TaskService {
 
     private void recordEscalated(Task task) {
         eventOutboxService.record("task.escalated", AggregateType.TASK, task.getTaskId(),
-                Map.of("taskId", task.getTaskId().toString(), "occurredAt", OffsetDateTime.now().toString()));
+                Map.of("taskId", task.getTaskId().toString(), "reason", String.valueOf(task.getEscalationReason()),
+                        "occurredAt", OffsetDateTime.now().toString()));
     }
 }

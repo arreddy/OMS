@@ -9,9 +9,11 @@ import com.oms.service.OrderService;
 import com.oms.web.dto.OrderDtos.*;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -49,11 +51,15 @@ public class OrderController {
     }
 
     @GetMapping
-    public Page<OrderResponse> list(@RequestParam(required = false) String status,
-                                     @RequestParam(required = false) String orderType,
+    public Page<OrderResponse> list(@RequestParam(required = false) List<String> status,
+                                     @RequestParam(required = false) List<String> orderType,
                                      @RequestParam(required = false) String customerRef,
+                                     @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime createdFrom,
+                                     @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime createdTo,
+                                     @RequestParam(required = false) Boolean hasOpenTask,
                                      Pageable pageable) {
-        return orderService.listOrders(status, orderType, customerRef, pageable).map(this::toResponse);
+        return orderService.listOrders(status, orderType, customerRef, createdFrom, createdTo, hasOpenTask, pageable)
+                .map(this::toResponse);
     }
 
     @PatchMapping("/{id}")
@@ -95,8 +101,13 @@ public class OrderController {
                 line.getUnitPrice(), line.getLineTotal(), line.getStatus(), readJson(line.getAttributes()), line.getVersion());
     }
 
+    /**
+     * Jackson deserializes an explicit JSON `null` for a JsonNode-typed field
+     * into a NullNode instance, not a Java null reference — node == null only
+     * catches an omitted field. Both must mean "no value given" here.
+     */
     private String jsonToString(JsonNode node) {
-        return node == null ? null : node.toString();
+        return (node == null || node.isNull()) ? null : node.toString();
     }
 
     private JsonNode readJson(String json) {

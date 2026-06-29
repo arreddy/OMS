@@ -70,7 +70,9 @@ public class WorkflowController {
 
         List<StateResponse> states = workflowStateRepository.findByWorkflowDefinition_WorkflowDefinitionId(id)
                 .stream()
-                .map(s -> new StateResponse(s.getStateId(), s.getCode(), s.getStateType(), s.isInitial(), s.isTerminal(), s.getDefaultAssigneeGroup()))
+                .map(s -> new StateResponse(s.getStateId(), s.getCode(), s.getStateType(), s.isInitial(), s.isTerminal(),
+                        s.getDefaultAssigneeGroup(), s.isCustomerVisible(), s.getCustomerFacingLabel(),
+                        s.getTerminalOutcome(), s.getCanvasX(), s.getCanvasY()))
                 .toList();
         List<TransitionResponse> transitions = workflowTransitionRepository.findByWorkflowDefinition_WorkflowDefinitionId(id)
                 .stream()
@@ -99,6 +101,8 @@ public class WorkflowController {
                         l.getTriggerCode(), l.getTriggeredBy(), l.getComment(), l.getOccurredAt()))
                 .toList();
 
-        return new WorkflowInstanceResponse(instance.getInstanceId(), orderId, current.getCode(), current.isTerminal(), options, history);
+        return new WorkflowInstanceResponse(instance.getInstanceId(), orderId,
+                instance.getWorkflowDefinition().getWorkflowDefinitionId(), current.getCode(), current.isTerminal(),
+                options, history);
     }
 }
