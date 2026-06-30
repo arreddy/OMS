@@ -5,10 +5,13 @@ import com.oms.domain.task.Task;
 import com.oms.domain.task.TaskComment;
 import com.oms.domain.task.TaskDecision;
 import com.oms.domain.task.TaskStatus;
+import com.oms.domain.tenant.Tenant;
 import com.oms.exception.ConflictException;
 import com.oms.exception.NotFoundException;
 import com.oms.repository.TaskCommentRepository;
 import com.oms.repository.TaskRepository;
+import com.oms.repository.TenantRepository;
+import com.oms.tenant.TenantContext;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
@@ -29,15 +32,18 @@ public class TaskService {
     private final TaskCommentRepository taskCommentRepository;
     private final WorkflowEngineService workflowEngineService;
     private final EventOutboxService eventOutboxService;
+    private final TenantRepository tenantRepository;
 
     public TaskService(TaskRepository taskRepository,
                         TaskCommentRepository taskCommentRepository,
                         WorkflowEngineService workflowEngineService,
-                        EventOutboxService eventOutboxService) {
+                        EventOutboxService eventOutboxService,
+                        TenantRepository tenantRepository) {
         this.taskRepository = taskRepository;
         this.taskCommentRepository = taskCommentRepository;
         this.workflowEngineService = workflowEngineService;
         this.eventOutboxService = eventOutboxService;
+        this.tenantRepository = tenantRepository;
     }
 
     public Task getTask(UUID taskId) {
@@ -163,6 +169,15 @@ public class TaskService {
     @Scheduled(fixedDelayString = "${oms.task.sla-sweep-interval-ms:30000}")
     @Transactional
     public void sweepSlaBreaches() {
+        // Runs outside any HTTP request, so there's no X-Tenant-Id to resolve
+        // a tenant from — @TenantId-filtered queries need one set explicitly,
+        // one tenant at a time.
+        for (Tenant t : tenantRepository.findAllByActiveTrue()) {
+            TenantContext.runAs(t.getTenantId(), () -> sweepSlaBreachesForTenant());
+        }
+    }
+
+    private void sweepSlaBreachesForTenant() {
         List<Task> overdue = taskRepository.findByStatusInAndSlaDueAtBefore(
                 List.of(TaskStatus.UNASSIGNED, TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS), OffsetDateTime.now());
         for (Task task : overdue) {

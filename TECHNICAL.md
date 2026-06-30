@@ -27,23 +27,26 @@
    - 7.10 [Optimistic Lock Conflict](#710-optimistic-lock-conflict)
    - 7.11 [Transactional Outbox — Event Delivery](#711-transactional-outbox--event-delivery)
    - 7.12 [Order Schema Extension (PATCH)](#712-order-schema-extension-patch)
+   - 7.13 [Tenant Resolution](#713-tenant-resolution)
 8. [Workflow Engine Deep Dive](#8-workflow-engine-deep-dive)
 9. [Human Task Queue](#9-human-task-queue)
 10. [Event System](#10-event-system)
 11. [Frontend Architecture](#11-frontend-architecture)
 12. [Concurrency & Consistency](#12-concurrency--consistency)
+13. [Multi-Tenancy](#13-multi-tenancy)
 
 ---
 
 ## 1. System Overview
 
-The OMS is a self-contained order management system composed of three concerns:
+The OMS is a self-contained, multi-tenant order management system composed of four concerns:
 
 | Concern | Description |
 |---|---|
 | **Order model** | Fixed typed columns (`order_id`, `total_amount`, etc.) plus a schema-validated JSONB extension bag (`attributes`) per order type — no EAV, no migrations for new fields. |
 | **Workflow engine** | A configurable state machine (not a hardcoded status enum). Each order type carries its own versioned `workflow_definition`; every order gets a pinned `workflow_instance` that runs independently of later definition changes. |
 | **Human task queue** | `MANUAL` workflow states automatically generate tasks. Agents claim, approve, or reject tasks; decisions are translated back into workflow transition triggers. |
+| **Multi-tenancy** | Every order-type, workflow, order, and task row carries a `tenant_id`, resolved per request from `X-Tenant-Id` and enforced automatically by Hibernate (§13) — no tenant-aware code in any service. |
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -80,9 +83,12 @@ The OMS is a self-contained order management system composed of three concerns:
               │  order, order_line, order_type,          │
               │  workflow_definition/state/transition,   │
               │  workflow_instance, workflow_transition_ │
-              │  log, task, task_comment, domain_event   │
+              │  log, task, task_comment, domain_event,  │
+              │  tenant                                  │
               └─────────────────────────────────────────┘
 ```
+
+Not pictured above: a `TenantFilter` runs in front of every controller (highest-precedence servlet filter), resolving `X-Tenant-Id` into a `ThreadLocal` that Hibernate reads to scope every query/insert against the tables in the box above (except `tenant` itself). See §13.
 
 ---
 
@@ -94,6 +100,7 @@ The OMS is a self-contained order management system composed of three concerns:
 | **Persistence** | PostgreSQL 16, Spring Data JPA / Hibernate, Flyway migrations |
 | **Guard evaluation** | JSON Logic (safe-by-construction, no arbitrary code execution) |
 | **Schema validation** | JSON Schema (via `JsonSchemaValidationService`) |
+| **Multi-tenancy** | Hibernate 6 `@TenantId` (discriminator-column tenant isolation, §13) |
 | **API docs** | SpringDoc / OpenAPI 3 — auto-generated, Swagger UI at `/swagger-ui/index.html` |
 | **Frontend** | React 18, TypeScript, Vite (dev proxy to `:8080`) |
 | **Testing** | JUnit 5, Testcontainers (Postgres) for integration tests |
@@ -112,11 +119,12 @@ OMS/
 │   │   ├── event/        DomainEvent, AggregateType
 │   │   ├── order/        Order, OrderLine, OrderType
 │   │   ├── task/         Task, TaskComment, TaskDecision, TaskStatus
+│   │   ├── tenant/       Tenant (registry row — itself not tenant-scoped)
 │   │   └── workflow/     WorkflowDefinition, WorkflowState, WorkflowTransition,
 │   │                     WorkflowInstance, WorkflowTransitionLog,
 │   │                     StateType, TriggerType, TerminalOutcome, BadgeCategory
 │   ├── exception/        ConflictException, NotFoundException
-│   ├── repository/       One Spring Data repo per aggregate root
+│   ├── repository/       One Spring Data repo per aggregate root, plus TenantRepository
 │   ├── service/
 │   │   ├── OrderService.java
 │   │   ├── OrderTypeService.java
@@ -126,6 +134,8 @@ OMS/
 │   │   ├── DomainEventPublisher.java
 │   │   ├── guard/        GuardEvaluator (JSON Logic)
 │   │   └── validation/   JsonSchemaValidationService, SchemaValidationException
+│   ├── tenant/           TenantContext, TenantFilter, SpringTenantIdentifierResolver,
+│   │                     TenantHibernateConfig (§13)
 │   └── web/
 │       ├── GlobalExceptionHandler.java
 │       ├── OrderController.java
@@ -134,10 +144,11 @@ OMS/
 │       ├── WorkflowController.java
 │       └── dto/          OrderDtos, OrderTypeDtos, TaskDtos, WorkflowDtos
 ├── src/main/resources/
-│   ├── application.properties
-│   └── db/migration/     Flyway SQL migrations (V1__*, V2__*, ...)
+│   ├── application.yml
+│   └── db/migration/     Flyway SQL migrations (V1__init_schema, V2__seed_standard_order_type,
+│                         V3__ui_surface_fields, V4__add_multi_tenancy)
 ├── src/test/java/com/oms/
-│   └── OrderWorkflowIT.java  (Testcontainers integration test)
+│   └── integration/OrderWorkflowIT.java  (Testcontainers integration test)
 ├── web/                  React frontend (Vite)
 │   └── src/
 │       ├── admin/        OrderTypeEditorPage, OrderTypeListPage,
@@ -164,9 +175,16 @@ OMS/
 
 ```mermaid
 erDiagram
+    TENANT {
+        VARCHAR tenant_id PK
+        VARCHAR name
+        BOOLEAN is_active
+    }
+
     ORDER_TYPE {
         UUID order_type_id PK
-        VARCHAR code UK
+        VARCHAR tenant_id FK
+        VARCHAR code UK "UNIQUE (tenant_id, code)"
         VARCHAR name
         JSONB attribute_schema
         JSONB line_attribute_schema
@@ -176,8 +194,9 @@ erDiagram
 
     ORDER {
         UUID order_id PK
-        VARCHAR order_number UK
-        VARCHAR order_type_code FK
+        VARCHAR tenant_id FK
+        VARCHAR order_number UK "globally unique, not per-tenant"
+        VARCHAR order_type_code FK "composite FK (tenant_id, order_type_code)"
         VARCHAR status
         VARCHAR customer_ref
         CHAR currency
@@ -192,6 +211,7 @@ erDiagram
 
     ORDER_LINE {
         UUID line_id PK
+        VARCHAR tenant_id FK
         UUID order_id FK
         INT line_number
         VARCHAR item_ref
@@ -205,14 +225,16 @@ erDiagram
 
     WORKFLOW_DEFINITION {
         UUID workflow_definition_id PK
+        VARCHAR tenant_id FK
         VARCHAR order_type_code
-        INT version
+        INT version "UNIQUE (tenant_id, order_type_code, version)"
         VARCHAR name
         TIMESTAMPTZ published_at
     }
 
     WORKFLOW_STATE {
         UUID state_id PK
+        VARCHAR tenant_id FK
         UUID workflow_definition_id FK
         VARCHAR code
         ENUM state_type
@@ -228,6 +250,7 @@ erDiagram
 
     WORKFLOW_TRANSITION {
         UUID transition_id PK
+        VARCHAR tenant_id FK
         UUID workflow_definition_id FK
         UUID from_state_id FK
         UUID to_state_id FK
@@ -240,6 +263,7 @@ erDiagram
 
     WORKFLOW_INSTANCE {
         UUID instance_id PK
+        VARCHAR tenant_id FK
         UUID order_id FK
         UUID workflow_definition_id FK
         UUID current_state_id FK
@@ -250,6 +274,7 @@ erDiagram
 
     WORKFLOW_TRANSITION_LOG {
         UUID log_id PK
+        VARCHAR tenant_id FK
         UUID instance_id FK
         VARCHAR from_state_code
         VARCHAR to_state_code
@@ -262,6 +287,7 @@ erDiagram
 
     TASK {
         UUID task_id PK
+        VARCHAR tenant_id FK
         UUID order_id FK
         UUID workflow_instance_id FK
         UUID state_id FK
@@ -283,6 +309,7 @@ erDiagram
 
     TASK_COMMENT {
         UUID comment_id PK
+        VARCHAR tenant_id FK
         UUID task_id FK
         VARCHAR author_id
         TEXT body
@@ -291,6 +318,7 @@ erDiagram
 
     DOMAIN_EVENT {
         UUID event_id PK
+        VARCHAR tenant_id FK
         VARCHAR event_type
         ENUM aggregate_type
         UUID aggregate_id
@@ -299,7 +327,18 @@ erDiagram
         TIMESTAMPTZ published_at
     }
 
-    ORDER_TYPE ||--o{ ORDER : "order_type_code"
+    TENANT ||--o{ ORDER_TYPE : "tenant_id"
+    TENANT ||--o{ ORDER : "tenant_id"
+    TENANT ||--o{ ORDER_LINE : "tenant_id"
+    TENANT ||--o{ WORKFLOW_DEFINITION : "tenant_id"
+    TENANT ||--o{ WORKFLOW_STATE : "tenant_id"
+    TENANT ||--o{ WORKFLOW_TRANSITION : "tenant_id"
+    TENANT ||--o{ WORKFLOW_INSTANCE : "tenant_id"
+    TENANT ||--o{ WORKFLOW_TRANSITION_LOG : "tenant_id"
+    TENANT ||--o{ TASK : "tenant_id"
+    TENANT ||--o{ TASK_COMMENT : "tenant_id"
+    TENANT ||--o{ DOMAIN_EVENT : "tenant_id"
+    ORDER_TYPE ||--o{ ORDER : "(tenant_id, order_type_code)"
     ORDER_TYPE ||--o| WORKFLOW_DEFINITION : "workflow_definition_id (active version)"
     ORDER ||--o{ ORDER_LINE : "order_id"
     ORDER ||--|| WORKFLOW_INSTANCE : "order_id"
@@ -325,6 +364,7 @@ erDiagram
 | `workflow_instance.workflow_definition_id` pinned at creation | In-flight orders are never silently affected by a new workflow version. |
 | `attributes` / `line_attributes` as JSONB | Avoids EAV join explosion; new fields are schema changes, not DDL migrations. |
 | Optimistic locks (`version` BIGINT) on `order`, `workflow_instance`, `task`, `order_line` | Concurrent task decisions and automated transitions can race on the same order; each lock is independent (SPEC.md §8). |
+| `tenant_id` as a discriminator column, not schema- or database-per-tenant | One Postgres schema, one Flyway migration path, one connection pool — isolation is enforced by Hibernate (§13), not by infrastructure separation. Revisit if a compliance requirement ever demands physical isolation. |
 
 ### Why `attributes` lives in the same `order` row (not a separate table)
 
@@ -455,6 +495,11 @@ This is how guard-only branches work: a state with two outbound null-trigger tra
 
 ## 6. API Reference
 
+Every endpoint below, in addition to whatever's listed under "Auth header",
+requires `X-Tenant-Id` — resolved by `TenantFilter` before any controller
+runs (§13). It's omitted from the per-row "Auth header" column below since
+it applies uniformly, the same way it isn't repeated in SPEC.md §6.
+
 ### Orders
 
 | Method | Path | Auth header | Request | Response | Status |
@@ -503,8 +548,8 @@ This is how guard-only branches work: a state with two outbound null-trigger tra
 
 | HTTP Status | Trigger |
 |---|---|
-| 400 Bad Request | Schema validation failure, blank escalation reason, invalid workflow graph on publish |
-| 404 Not Found | Unknown order/task/order-type ID or code |
+| 400 Bad Request | Schema validation failure, blank escalation reason, invalid workflow graph on publish, missing `X-Tenant-Id` header |
+| 404 Not Found | Unknown order/task/order-type ID or code, or an `X-Tenant-Id` with no matching row in `tenant` |
 | 409 Conflict | Optimistic lock version mismatch (`If-Match` header doesn't match stored `version`), transition not valid from current state, workflow already completed |
 
 ---
@@ -1013,6 +1058,50 @@ sequenceDiagram
 
 ---
 
+### 7.13 Tenant Resolution
+
+Runs in front of every request in §7.1–§7.12 above; omitted from those diagrams for brevity. Full detail in §13.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant TF as TenantFilter
+    participant TR as TenantRepository
+    participant TC as TenantContext (ThreadLocal)
+    participant Ctrl as Any Controller
+    participant Hib as Hibernate (SpringTenantIdentifierResolver)
+    participant DB as PostgreSQL
+
+    Client->>TF: any request, header X-Tenant-Id: acme
+    alt header missing or blank
+        TF-->>Client: 400 Bad Request
+    end
+    TF->>TR: findByTenantIdAndActiveTrue("acme")
+    TR->>DB: SELECT tenant WHERE tenant_id = 'acme' AND is_active
+    alt no matching row
+        DB-->>TR: empty
+        TF-->>Client: 404 Not Found
+    end
+    DB-->>TR: Tenant
+    TF->>TC: TenantContext.set("acme")
+
+    TF->>Ctrl: chain.doFilter() — request proceeds
+    Note over Ctrl: Controller/service code is unchanged —\n         no tenant-aware logic anywhere here.
+    Ctrl->>Hib: any query against a @TenantId entity\n         (Order, Task, OrderType, ...)
+    Hib->>TC: resolveCurrentTenantIdentifier()
+    TC-->>Hib: "acme"
+    Hib->>DB: ... WHERE tenant_id = 'acme' AND ...
+    DB-->>Ctrl: rows scoped to acme only
+
+    Ctrl-->>TF: response
+    TF->>TC: TenantContext.clear()  (in finally — always runs)
+    TF-->>Client: response
+```
+
+`TenantFilter` is registered at `Ordered.HIGHEST_PRECEDENCE` so it runs before Spring Security (if ever added) and every controller. The two `@Scheduled` jobs (SLA sweep, outbox publisher, §10) have no request to run this filter on, so they call `TenantContext.runAs(tenantId, ...)` directly, once per active tenant — see §13.
+
+---
+
 ## 8. Workflow Engine Deep Dive
 
 ### State Types
@@ -1194,6 +1283,7 @@ App (React Router)
 All fetch calls go through `web/src/lib/api.ts` (a thin fetch wrapper):
 - Base URL resolved by Vite proxy (`/orders` → `http://localhost:8080/orders`).
 - `X-User-Id` injected from `actingUser` context (set in `OpsAdminLayout`).
+- `X-Tenant-Id` injected the same way, from `getActingTenant()`/`setActingTenant()` (`localStorage`, default `'default'`) — there's no tenant-switcher UI yet, so this always sends whatever's in `localStorage` (§13).
 - `If-Match` headers manually threaded through action calls.
 - `409 Conflict` surfaces as a thrown error the caller catches; `ConflictBanner` renders the message.
 
@@ -1241,5 +1331,94 @@ Time 0: order created → workflow_instance.workflow_definition_id = V1
 Time 1: admin publishes V2 → order_type.workflow_definition_id = V2
 Time 2: new orders pick up V2; existing order still runs on V1 (pinned)
 ```
+
+---
+
+## 13. Multi-Tenancy
+
+### Design
+
+Shared schema, discriminator column — not schema-per-tenant or database-per-tenant (see the Key Schema Decisions row in §4 for why). Every tenant-owned table carries a `tenant_id VARCHAR(64)` column: `order_type`, `order`, `order_line`, `workflow_definition`, `workflow_state`, `workflow_transition`, `workflow_instance`, `workflow_transition_log`, `task`, `task_comment`, `domain_event`. A separate `tenant` table (`tenant_id` PK, `name`, `is_active`) is the registry — it is not itself tenant-scoped.
+
+### Package layout
+
+```
+com.oms.domain.tenant.Tenant          JPA entity for the registry table
+com.oms.repository.TenantRepository   findAllByActiveTrue(), findByTenantIdAndActiveTrue(...)
+com.oms.tenant.TenantContext           ThreadLocal<String> holder; set/get/clear/runAs
+com.oms.tenant.TenantFilter            servlet Filter, Ordered.HIGHEST_PRECEDENCE
+com.oms.tenant.SpringTenantIdentifierResolver   Hibernate CurrentTenantIdentifierResolver<String>
+com.oms.tenant.TenantHibernateConfig   registers the resolver via HibernatePropertiesCustomizer
+```
+
+### Enforcement: Hibernate `@TenantId`, not application code
+
+Each of the 11 entities above has a field:
+
+```java
+@TenantId
+@Column(name = "tenant_id", nullable = false, updatable = false, length = 64)
+private String tenantId;
+```
+
+`@TenantId` is a Hibernate 6 ORM feature (not a JPA standard annotation). Once any entity in the persistence unit uses it and a `hibernate.tenant_identifier_resolver` is configured, Hibernate:
+- appends `tenant_id = ?` to the generated SQL for **every** query against that entity — derived queries, `@Query`, and `Specification`-based dynamic queries (`OrderRepository.hasStatusIn(...)`, `TaskRepository.hasAssigneeGroup(...)`, etc.) all pick it up automatically, with no change to any repository or service method;
+- populates `tenant_id` on `INSERT` from the same resolver;
+- rejects mutation of `tenant_id` after insert (`updatable = false`).
+
+This is why `OrderService`, `TaskService`, `OrderTypeService`, and `WorkflowEngineService` (§5) needed **zero** code changes to become tenant-aware.
+
+### Resolving "the current tenant"
+
+`SpringTenantIdentifierResolver.resolveCurrentTenantIdentifier()` returns `TenantContext.get()`. Two callers populate that `ThreadLocal`:
+
+1. **`TenantFilter`**, for every HTTP request (§7.13) — reads `X-Tenant-Id`, returns `400` if missing/blank, `404` if it doesn't match an active row in `tenant`, otherwise sets the context for the rest of the request and clears it in a `finally` block.
+2. **`TenantContext.runAs(tenantId, action)`**, for code that runs outside any request — see Scheduled jobs below.
+
+If Hibernate ever needs to resolve a tenant identifier with neither of the above having run — e.g. Spring Data's query-method validation at application startup, which opens a throwaway `Session` before any request exists — the resolver falls back to a sentinel string (`"__no_tenant__"`) instead of throwing. This keeps startup from failing, and because the sentinel matches no real `tenant_id` value, any *production* code path that somehow runs without a properly-set context fails safe (queries return nothing) rather than leaking another tenant's data by silently defaulting to a real tenant.
+
+### Scheduled jobs: the one gap `@TenantId` doesn't cover
+
+`TaskService.sweepSlaBreaches()` (§9, SLA escalation) and `DomainEventPublisher.publishPending()` (§10, outbox drain) are both `@Scheduled` — they run on a timer thread, not inside an HTTP request, so `TenantFilter` never touches them. Both now do:
+
+```java
+for (Tenant t : tenantRepository.findAllByActiveTrue()) {
+    TenantContext.runAs(t.getTenantId(), () -> /* unchanged per-tenant body */);
+}
+```
+
+The per-tenant body in each is exactly what it was before multi-tenancy — only the outer loop and the `TenantContext.runAs` wrapping are new. Both methods keep a single `@Transactional` boundary spanning the whole loop (all tenants), trading per-tenant transaction isolation for simplicity; a failure on one tenant's batch rolls back the whole sweep/publish cycle rather than just that tenant's slice. Given these jobs are idempotent and re-run every 30s/5s respectively, that's an acceptable trade.
+
+### Referential integrity across tenants
+
+Two natural-key uniqueness constraints that used to be global are now composite on `(tenant_id, ...)`:
+
+| Table | Old constraint | New constraint |
+|---|---|---|
+| `order_type` | `UNIQUE (code)` | `UNIQUE (tenant_id, code)` |
+| `workflow_definition` | `UNIQUE (order_type_code, version)` | `UNIQUE (tenant_id, order_type_code, version)` |
+
+The one FK that pointed at a natural key — `orders.order_type_code REFERENCES order_type (code)` — had to be widened to a composite FK, since a single-column FK to `code` would let an order resolve to *any* tenant's order type sharing that code:
+
+```sql
+ALTER TABLE orders
+    ADD CONSTRAINT fk_orders_order_type FOREIGN KEY (tenant_id, order_type_code)
+        REFERENCES order_type (tenant_id, code);
+```
+
+Every other FK in the schema (`workflow_state.workflow_definition_id`, `task.order_id`, etc.) keys off a globally-unique UUID primary key, so none of them needed to change — a UUID row only ever belongs to one tenant, by construction. `orders.order_number` deliberately stays globally unique (one shared `order_number_seq` across all tenants); there's no leak risk in a value nothing else joins against by natural key.
+
+### Migration (`V4__add_multi_tenancy.sql`)
+
+In order: create `tenant` and seed a `default` row → add `tenant_id` to all 11 tables with `DEFAULT 'default'` (backfills every existing row, since the column is `NOT NULL`) → drop the default (new rows must always supply a real value via `@TenantId`) → add FKs from each table's `tenant_id` to `tenant` → drop and recreate the `order_type`/`workflow_definition` unique constraints and the `orders → order_type` FK in the dependency order described above (the FK has to drop *before* its target unique constraint is replaced, or Postgres refuses with "other objects depend on it") → rebuild the low-cardinality composite indexes (`idx_orders_status`, `idx_orders_order_type_code`, `idx_orders_customer_ref`, `idx_task_status_assignee_group`, `idx_domain_event_unpublished`) with `tenant_id` as the leading column, since every one of these queries now also filters on `tenant_id` and would otherwise lose selectivity.
+
+### Frontend
+
+`web/src/lib/api.ts` sends `X-Tenant-Id` on every request (§11, API Client Layer) from `getActingTenant()`, mirroring `getActingUser()` exactly — same `localStorage` key pattern, same default-on-missing behavior (`'default'` vs `'ops-user'`). There is currently no UI control to change it; switching tenants in the browser means calling `localStorage.setItem('oms.actingTenant', '<id>')` directly (GUIDE.md §4.4).
+
+### Verification
+
+- `OrderWorkflowIT` sends `X-Tenant-Id: default` via a `ClientHttpRequestInterceptor` added to its `TestRestTemplate`, and additionally sets `TenantContext` directly in `@BeforeEach`/cleared in `@AfterEach` — needed because a couple of assertions call `DomainEventRepository` directly from the test thread, bypassing `TenantFilter` entirely (HTTP calls go through the filter on a *server* thread; direct repository calls from the test run on the *test's own* thread, which never goes through the filter).
+- Manual check: two tenants (`default`, and a freshly-inserted `acme`) can each register an `order_type` with `code = "STANDARD"` without conflict, and `GET /order-types` under each tenant returns only that tenant's rows — see GUIDE.md §4.3 for the exact commands.
 
 No in-flight order can be silently affected by a workflow edit. Orders complete on the version they started on, always.

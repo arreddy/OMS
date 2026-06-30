@@ -6,6 +6,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.annotations.TenantId;
 import org.hibernate.type.SqlTypes;
 
 import java.util.UUID;
@@ -26,6 +27,10 @@ public class OrderType {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "order_type_id")
     private UUID orderTypeId;
+
+    @TenantId
+    @Column(name = "tenant_id", nullable = false, updatable = false, length = 64)
+    private String tenantId;
 
     @Column(name = "code", nullable = false, unique = true, length = 50)
     private String code;

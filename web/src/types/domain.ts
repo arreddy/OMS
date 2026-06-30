@@ -120,6 +120,12 @@ export interface OrderType {
   active: boolean
 }
 
+export interface Tenant {
+  tenantId: string
+  name: string
+  active: boolean
+}
+
 export interface ActiveWorkflowSummary {
   workflowDefinitionId: string
   version: number

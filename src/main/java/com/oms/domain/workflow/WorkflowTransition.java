@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.TenantId;
 
 import java.util.UUID;
 
@@ -26,6 +27,10 @@ public class WorkflowTransition {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "transition_id")
     private UUID transitionId;
+
+    @TenantId
+    @Column(name = "tenant_id", nullable = false, updatable = false, length = 64)
+    private String tenantId;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "workflow_definition_id", nullable = false, updatable = false)

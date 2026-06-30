@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.TenantId;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -25,6 +26,10 @@ public class WorkflowDefinition {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "workflow_definition_id")
     private UUID workflowDefinitionId;
+
+    @TenantId
+    @Column(name = "tenant_id", nullable = false, updatable = false, length = 64)
+    private String tenantId;
 
     @Column(name = "order_type_code", nullable = false, length = 50)
     private String orderTypeCode;

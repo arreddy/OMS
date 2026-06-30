@@ -1,8 +1,10 @@
 # Order Management System
 
-A standalone OMS: core order model with a schema-validated JSON extension
-mechanism, a configurable workflow engine driving order lifecycle, and a
-human task queue for manual workflow steps.
+A standalone, multi-tenant OMS: core order model with a schema-validated JSON
+extension mechanism, a configurable workflow engine driving order lifecycle,
+and a human task queue for manual workflow steps. Every order-type, workflow,
+order, and task row is scoped to a tenant (SPEC.md §10) — every API request
+needs an `X-Tenant-Id` header.
 
 - [SPEC.md](SPEC.md) — backend design (data model, workflow engine, API surface)
 - [UI-SPEC.md](UI-SPEC.md) — frontend design (Ops Console, Customer Portal, Admin Console)
@@ -36,8 +38,10 @@ mvn spring-boot:run
 ```
 
 Runs on `http://localhost:8080`. Flyway applies all migrations on startup,
-including a seeded `STANDARD` order type with a published workflow — there's
-real data to look at immediately, no manual setup needed.
+including a seeded `default` tenant and a `STANDARD` order type with a
+published workflow (under that tenant) — there's real data to look at
+immediately, no manual setup needed. Every request needs an `X-Tenant-Id`
+header (`default` works out of the box) — see [GUIDE.md](GUIDE.md) §4.
 
 Swagger UI is at <http://localhost:8080/swagger-ui/index.html> (raw OpenAPI
 spec at `/v3/api-docs`) — auto-generated from the controllers, includes
@@ -52,9 +56,9 @@ npm run dev
 ```
 
 Runs on `http://localhost:5173`. The Vite dev server proxies `/orders`,
-`/order-types`, `/tasks`, and `/workflow-definitions` to the backend on
-`:8080`, so the browser sees everything as same-origin — no CORS config
-needed.
+`/order-types`, `/tasks`, `/workflow-definitions`, and `/tenants` to the
+backend on `:8080`, so the browser sees everything as same-origin — no CORS
+config needed.
 
 **4. Open the app**
 
@@ -68,7 +72,7 @@ see UI-SPEC.md §2.1). To get an order to look at:
 
 ```bash
 curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"orderTypeCode":"STANDARD","customerRef":"cust-1","currency":"USD","totalAmount":"500.00","attributes":{"giftMessage":"hi"}}'
 ```
 
@@ -103,6 +107,7 @@ docker compose down       # add -v to also wipe seeded/test data
 
 ```
 src/main/java/com/oms/      Backend (Spring Boot)
+src/main/java/com/oms/tenant/   Multi-tenancy: TenantFilter, TenantContext, Hibernate resolver
 src/main/resources/db/migration/   Flyway migrations
 src/test/java/com/oms/      Backend tests (unit + Testcontainers integration)
 web/                        Frontend (React + Vite)

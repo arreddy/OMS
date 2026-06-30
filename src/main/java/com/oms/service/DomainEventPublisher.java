@@ -1,7 +1,10 @@
 package com.oms.service;
 
 import com.oms.domain.event.DomainEvent;
+import com.oms.domain.tenant.Tenant;
 import com.oms.repository.DomainEventRepository;
+import com.oms.repository.TenantRepository;
+import com.oms.tenant.TenantContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -25,14 +28,25 @@ public class DomainEventPublisher {
     private static final Logger log = LoggerFactory.getLogger(DomainEventPublisher.class);
 
     private final DomainEventRepository domainEventRepository;
+    private final TenantRepository tenantRepository;
 
-    public DomainEventPublisher(DomainEventRepository domainEventRepository) {
+    public DomainEventPublisher(DomainEventRepository domainEventRepository, TenantRepository tenantRepository) {
         this.domainEventRepository = domainEventRepository;
+        this.tenantRepository = tenantRepository;
     }
 
     @Scheduled(fixedDelayString = "${oms.outbox.publish-interval-ms:5000}")
     @Transactional
     public void publishPending() {
+        // Runs outside any HTTP request, so there's no X-Tenant-Id to resolve
+        // a tenant from — @TenantId-filtered queries need one set explicitly,
+        // one tenant at a time.
+        for (Tenant t : tenantRepository.findAllByActiveTrue()) {
+            TenantContext.runAs(t.getTenantId(), () -> publishPendingForTenant());
+        }
+    }
+
+    private void publishPendingForTenant() {
         List<DomainEvent> pending = domainEventRepository.findTop100ByPublishedAtIsNullOrderByOccurredAtAsc();
         for (DomainEvent event : pending) {
             publish(event);

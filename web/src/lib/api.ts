@@ -1,4 +1,5 @@
 const ACTING_USER_KEY = 'oms.actingUser'
+const ACTING_TENANT_KEY = 'oms.actingTenant'
 
 export function getActingUser(): string {
   return localStorage.getItem(ACTING_USER_KEY) || 'ops-user'
@@ -6,6 +7,14 @@ export function getActingUser(): string {
 
 export function setActingUser(user: string): void {
   localStorage.setItem(ACTING_USER_KEY, user)
+}
+
+export function getActingTenant(): string {
+  return localStorage.getItem(ACTING_TENANT_KEY) || 'default'
+}
+
+export function setActingTenant(tenant: string): void {
+  localStorage.setItem(ACTING_TENANT_KEY, tenant)
 }
 
 export class ApiError extends Error {
@@ -52,6 +61,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-User-Id': getActingUser(),
+    'X-Tenant-Id': getActingTenant(),
   }
   if (options.ifMatch !== undefined) {
     headers['If-Match'] = String(options.ifMatch)

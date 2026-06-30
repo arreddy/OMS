@@ -2,10 +2,11 @@
 
 ## 1. Scope
 
-A standalone OMS with:
+A standalone, **multi-tenant** OMS with:
 - A **core order model** with fixed, typed, indexable fields plus a **schema-validated extension mechanism** for order-type-specific data — no EAV, no migrations for new order types.
 - A **configurable workflow engine** (state machine, not hardcoded status enum) driving order lifecycle, versioned independently per order type.
 - A **human task queue** for manual workflow steps, with assignment, claim, approve/reject, and escalation.
+- **Tenant isolation** on every order-type, workflow, order, and task row, enforced at the ORM layer rather than scattered through service code (§10).
 
 ---
 
@@ -19,6 +20,7 @@ A standalone OMS with:
 | Workflow definitions are versioned and immutable once published | In-flight orders must not be silently affected by a workflow edit. |
 | Manual steps are first-class workflow states, not application-level if/else | A "MANUAL" state type generates a task automatically; approve/reject are just transition triggers. |
 | Optimistic locking everywhere mutable | Manual task actions and automated transitions can race on the same order. |
+| Tenant isolation lives in the ORM, not service code | A `tenant_id` discriminator column on every tenant-owned table is auto-populated and auto-filtered by Hibernate (§10) — `OrderService`, `TaskService`, and `WorkflowEngineService` carry no tenant-aware logic at all. |
 
 ---
 
@@ -29,8 +31,9 @@ A standalone OMS with:
 | Column | Type | Notes |
 |---|---|---|
 | order_id | UUID, PK | |
-| order_number | VARCHAR(40), UNIQUE | Human-readable, format owned by order_type |
-| order_type_code | VARCHAR(50), FK → order_type.code | Discriminator: drives extension schema + workflow. **Immutable after creation** — changing it would orphan the pinned `workflow_instance` and invalidate `attributes` against a different schema. |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
+| order_number | VARCHAR(40), UNIQUE | Human-readable, format owned by order_type. Globally unique across tenants (single shared sequence) — a deliberate exception to "scope everything to tenant_id" (§10). |
+| order_type_code | VARCHAR(50), FK → `order_type (tenant_id, code)` (composite) | Discriminator: drives extension schema + workflow. **Immutable after creation** — changing it would orphan the pinned `workflow_instance` and invalidate `attributes` against a different schema. The FK is composite on `(tenant_id, order_type_code)` so an order can never resolve to another tenant's order type, even if both tenants happen to use the same code (§10). |
 | status | VARCHAR(50) | Mirrors `workflow_instance.current_state_code` |
 | customer_ref | VARCHAR(100) | External ID, no FK — loose coupling to customer domain |
 | currency | CHAR(3) | ISO 4217 |
@@ -45,6 +48,7 @@ A standalone OMS with:
 | Column | Type | Notes |
 |---|---|---|
 | line_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | order_id | UUID, FK → order | |
 | line_number | INT | Unique per `order_id` (`UNIQUE (order_id, line_number)`) |
 | item_ref | VARCHAR(100) | External SKU/item ID |
@@ -60,7 +64,8 @@ A standalone OMS with:
 | Column | Type | Notes |
 |---|---|---|
 | order_type_id | UUID, PK | |
-| code | VARCHAR(50), UNIQUE | e.g. `STANDARD`, `SUBSCRIPTION`, `B2B_BULK` |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
+| code | VARCHAR(50), UNIQUE per tenant (`UNIQUE (tenant_id, code)`) | e.g. `STANDARD`, `SUBSCRIPTION`, `B2B_BULK`. Two tenants may both define a `STANDARD` order type independently. |
 | name | VARCHAR(100) | |
 | attribute_schema | JSONB | JSON Schema — validates `order.attributes` |
 | line_attribute_schema | JSONB | JSON Schema — validates `order_line.attributes` |
@@ -87,8 +92,9 @@ Workflow is decoupled from `order` entirely — `order.status` is a read-optimiz
 | Column | Type | Notes |
 |---|---|---|
 | workflow_definition_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | order_type_code | VARCHAR(50) | |
-| version | INT | Monotonic per order_type_code |
+| version | INT | Monotonic per `(tenant_id, order_type_code)` — each tenant versions its own copy of an order type's workflow independently. |
 | name | VARCHAR(100) | |
 | published_at | TIMESTAMPTZ | Immutable once published |
 
@@ -99,6 +105,7 @@ There is no `is_active` flag on this table. "Active version for an order type" i
 | Column | Type | Notes |
 |---|---|---|
 | state_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | workflow_definition_id | UUID, FK | |
 | code | VARCHAR(50) | e.g. `CREATED`, `CREDIT_REVIEW`, `FULFILLED` |
 | state_type | ENUM | `AUTOMATIC` \| `MANUAL` \| `WAIT` |
@@ -121,6 +128,7 @@ In short: `AUTOMATIC` and `WAIT` share one evaluation path; they differ only in 
 | Column | Type | Notes |
 |---|---|---|
 | transition_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | workflow_definition_id | UUID, FK | |
 | from_state_id | UUID, FK → workflow_state | |
 | to_state_id | UUID, FK → workflow_state | |
@@ -137,6 +145,7 @@ A `MANUAL` state typically has exactly two outbound transitions: one `TASK_APPRO
 | Column | Type | Notes |
 |---|---|---|
 | instance_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | order_id | UUID, FK → order, UNIQUE | |
 | workflow_definition_id | UUID, FK | Pinned at creation — survives later workflow edits |
 | current_state_id | UUID, FK → workflow_state | |
@@ -148,6 +157,7 @@ A `MANUAL` state typically has exactly two outbound transitions: one `TASK_APPRO
 | Column | Type | Notes |
 |---|---|---|
 | log_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | instance_id | UUID, FK | |
 | from_state_code / to_state_code | VARCHAR(50) | |
 | trigger_type / trigger_code | | |
@@ -196,6 +206,7 @@ If a future order type needs genuinely independent per-line approval workflows (
 | Column | Type | Notes |
 |---|---|---|
 | task_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | order_id | UUID, FK | |
 | workflow_instance_id | UUID, FK | |
 | state_id | UUID, FK → workflow_state | The MANUAL state this task corresponds to |
@@ -217,6 +228,7 @@ If a future order type needs genuinely independent per-line approval workflows (
 | Column | Type | Notes |
 |---|---|---|
 | comment_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | task_id | UUID, FK | |
 | author_id | VARCHAR(100) | |
 | body | TEXT | |
@@ -232,6 +244,12 @@ If a future order type needs genuinely independent per-line approval workflows (
 ---
 
 ## 6. API Surface
+
+Every endpoint below requires an `X-Tenant-Id` header identifying which
+tenant the request acts on — there's no default tenant fallback at the API
+layer. Missing the header returns `400`; a value that doesn't match a row in
+the `tenant` table returns `404`. See §10 for how this is resolved and
+enforced.
 
 ### Orders
 
@@ -294,6 +312,7 @@ Emitting events as a separate publish step alongside the DB transaction in §8 i
 | Column | Type | Notes |
 |---|---|---|
 | event_id | UUID, PK | |
+| tenant_id | VARCHAR(64) | Auto-populated, immutable (§10) |
 | event_type | VARCHAR(50) | e.g. `order.created`, `workflow.transitioned` |
 | aggregate_type | VARCHAR(50) | `ORDER` \| `WORKFLOW_INSTANCE` \| `TASK` |
 | aggregate_id | UUID | |
@@ -301,7 +320,7 @@ Emitting events as a separate publish step alongside the DB transaction in §8 i
 | occurred_at | TIMESTAMPTZ | |
 | published_at | TIMESTAMPTZ, nullable | Null until a publisher confirms delivery to the broker |
 
-A separate publisher process polls `WHERE published_at IS NULL` (or taps the table via CDC, e.g. Debezium) and dispatches rows to the message bus, then sets `published_at`. This guarantees at-least-once delivery without coupling the transition handler to broker availability. Consumers must dedupe on `event_id`, since at-least-once means occasional redelivery.
+A separate publisher process polls `WHERE published_at IS NULL` (or taps the table via CDC, e.g. Debezium) and dispatches rows to the message bus, then sets `published_at`. This guarantees at-least-once delivery without coupling the transition handler to broker availability. Consumers must dedupe on `event_id`, since at-least-once means occasional redelivery. Because `domain_event` is tenant-scoped (§10), the in-process publisher polls once per active tenant rather than once globally — see §10's note on scheduled jobs.
 
 ---
 
@@ -310,9 +329,29 @@ A separate publisher process polls `WHERE published_at IS NULL` (or taps the tab
 - `order.version`, `workflow_instance.version`, and `task.version` are independent optimistic locks — a task approval touches all three and inserts the corresponding `domain_event` row (§7.1), all within a single DB transaction.
 - `order.status` is written **only** by the transition handler, never directly via `PATCH /orders/{id}` — prevents status drifting out of sync with the workflow engine.
 - Workflow definitions are immutable post-publish; an in-flight `workflow_instance` keeps its pinned `workflow_definition_id` even after a new version goes active (i.e., even after `order_type.workflow_definition_id` is repointed, §4.1). New orders of that type pick up the new version on creation.
+- `tenant_id` is set once at insert and never updated (`updatable = false` on every entity) — it is not a value any service ever changes, so it carries no optimistic-lock or race-condition concerns of its own.
 
 ## 9. Open Extension Points (intentionally unspecified here)
 
 - Guard expression language choice (CEL vs JSONLogic vs custom DSL).
 - Escalation policy configuration (single table vs rules engine).
-- Multi-tenancy column (`tenant_id`) — omitted since this spec targets a standalone deployment; trivial to add as a leading composite-index column if needed later.
+- Tenant provisioning API — tenants are currently registered by inserting a row into the `tenant` table directly (no `POST /tenants` endpoint exists). A self-service or admin-facing tenant-provisioning endpoint is a natural next step once there's a real onboarding flow.
+- Tenant-aware authentication — `X-Tenant-Id` is a trusted, unauthenticated header today, the same posture as `X-User-Id` (§6). Swapping in real auth (e.g. deriving the tenant from a JWT claim) only requires changing what `TenantFilter` reads the value from (§10) — the rest of the tenant-isolation mechanism is unaffected.
+
+---
+
+## 10. Multi-Tenancy
+
+**Model:** shared schema, discriminator column. Every tenant-owned table (`order_type`, `order`, `order_line`, `workflow_definition`, `workflow_state`, `workflow_transition`, `workflow_instance`, `workflow_transition_log`, `task`, `task_comment`, `domain_event`) carries a `tenant_id VARCHAR(64)` column, backed by a `tenant` registry table (`tenant_id` PK, `name`, `is_active`).
+
+**Enforcement lives in the ORM, not in services.** Each entity's `tenant_id` field is annotated `@TenantId` (a Hibernate 6 feature). Hibernate automatically:
+- appends `tenant_id = ?` to every query issued against a tenant-owned entity, including dynamic `Specification` queries (`OrderRepository`, `TaskRepository`), and
+- populates `tenant_id` on insert,
+
+both from a `CurrentTenantIdentifierResolver` bean backed by a request-scoped `ThreadLocal`. As a direct consequence, `OrderService`, `TaskService`, `OrderTypeService`, and `WorkflowEngineService` required **no code changes** to become tenant-aware — every query they already had stays exactly as written.
+
+**Resolving the tenant per request.** A servlet filter (`TenantFilter`) runs first in the chain, reads `X-Tenant-Id` (mirroring the existing trusted `X-User-Id` pattern — there is no auth framework in this project yet, §6), rejects a missing value with `400` and an unknown one with `404` (checked against the `tenant` table), then sets the `ThreadLocal` for the rest of the request and clears it afterward.
+
+**Scheduled jobs are the one place this doesn't reach.** The SLA sweep and the domain-event outbox publisher (§7.1) both run on a timer, outside any HTTP request — there is no header to resolve a tenant from. Both loop over every active tenant from the registry and run their existing (unchanged) per-tenant body once per iteration, with the `ThreadLocal` set for that iteration only.
+
+**Referential integrity across tenants.** Natural-key uniqueness that used to be global is now scoped to `(tenant_id, ...)`: `order_type.code`, and `workflow_definition`'s `(order_type_code, version)`. The one FK that pointed at a natural key — `order.order_type_code → order_type.code` — was widened to a composite `(tenant_id, order_type_code) → order_type (tenant_id, code)`, since otherwise an order could resolve to a *different* tenant's order type if both tenants happened to reuse the same code. Every other FK in the schema keys off a globally-unique UUID primary key, so no other FK needed to change — a UUID row only ever belongs to one tenant. `order.order_number` deliberately stays globally unique (one shared sequence across all tenants); there was no reason to scope it.

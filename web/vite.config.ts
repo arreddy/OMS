@@ -14,6 +14,7 @@ export default defineConfig({
       '/order-types': API_PROXY_TARGET,
       '/tasks': API_PROXY_TARGET,
       '/workflow-definitions': API_PROXY_TARGET,
+      '/tenants': API_PROXY_TARGET,
     },
   },
 })

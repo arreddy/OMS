@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.TenantId;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -20,6 +21,10 @@ public class WorkflowState {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "state_id")
     private UUID stateId;
+
+    @TenantId
+    @Column(name = "tenant_id", nullable = false, updatable = false, length = 64)
+    private String tenantId;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "workflow_definition_id", nullable = false, updatable = false)

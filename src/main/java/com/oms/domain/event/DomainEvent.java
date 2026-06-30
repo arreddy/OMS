@@ -6,6 +6,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.annotations.TenantId;
 import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
@@ -28,6 +29,10 @@ public class DomainEvent {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "event_id")
     private UUID eventId;
+
+    @TenantId
+    @Column(name = "tenant_id", nullable = false, updatable = false, length = 64)
+    private String tenantId;
 
     @Column(name = "event_type", nullable = false, length = 50)
     private String eventType;

@@ -2,6 +2,8 @@
 
 Companion to `SPEC.md`. Covers three surfaces: **Ops Console** (back-office), **Customer Portal** (order tracking), **Admin Console** (order-type / workflow config).
 
+All three surfaces operate within a single tenant at a time (SPEC.md §10). Every API call from `web/src/lib/api.ts` sends an `X-Tenant-Id` header alongside `X-User-Id`, resolved the same way (`localStorage`, default `'default'`). **There is no tenant-switcher control in any surface yet** — the same gap as having no real login: the right place for a tenant picker, once one exists, is the same header/chrome area as a future user/account switcher, not a separate screen.
+
 ---
 
 ## 1. Screen Inventory
@@ -162,6 +164,7 @@ Simple table: Code · Name · Active · Workflow version · Last updated. "New o
 - **Optimistic lock conflicts** (any surface, any optimistically-locked record — orders, tasks, lines all carry a `version`): on `409`, show "This {record} changed since you loaded it" + auto-refresh the record, do not silently overwrite. The record name in the message must match what the user was acting on (e.g. "This task changed..." for an inline queue-row Approve/Reject, not "This order changed..." — the task queue's inline actions can 409 independently of anything happening to the order itself).
 - **Color is never the only signal.** Every place this spec uses color to encode meaning (status badges, SLA due column, designer node colors) also carries a text label or icon. This is a hard rule, not a per-screen suggestion — re-check it whenever a new color-coded element is added.
 - **Empty/error voice**: system copy, not personified — "Couldn't load tasks. Retry", never "Oops! Something went wrong on our end!"
+- **Tenant errors are not modeled as a distinct UI state yet.** A `400` (missing tenant) or `404` (unknown tenant) from the `X-Tenant-Id` check (SPEC.md §10) currently surfaces through the same generic error handling as any other failed request — there's no "you're not part of this tenant" screen, because there's no tenant-switcher UI to land on one from (§1 above).
 
 ---
 

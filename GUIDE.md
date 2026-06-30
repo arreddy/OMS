@@ -8,6 +8,12 @@ All `curl` examples assume the backend is running on `:8080` (see README) and
 use `X-User-Id` to set who an action is attributed to — there's no real auth,
 so any value is accepted.
 
+The OMS is multi-tenant (SPEC.md §10): every request also needs an
+`X-Tenant-Id` header. There's no fallback — a missing header returns `400`,
+an unrecognized one returns `404`. Flyway seeds a `default` tenant
+(`V4__add_multi_tenancy.sql`), which every example below uses; see §4 for how
+to register another one.
+
 ---
 
 ## 1. Testing end-to-end
@@ -33,55 +39,55 @@ has room for.
 
 ```bash
 ORDER_ID=$(curl -s -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"orderTypeCode":"STANDARD","customerRef":"cust-1","currency":"USD","totalAmount":"500.00"}' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['orderId'])")
 
 # CREATED -> PAYMENT_PENDING
 curl -s -X POST http://localhost:8080/orders/$ORDER_ID/workflow/transitions \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"triggerType":"EVENT","triggerCode":"order.submitted"}'
 
 # PAYMENT_PENDING -> FULFILLMENT_QUEUED (guard didn't fire since 500 <= 1000)
 curl -s -X POST http://localhost:8080/orders/$ORDER_ID/workflow/transitions \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"triggerType":"EVENT","triggerCode":"payment.captured"}'
 
 # FULFILLMENT_QUEUED -> SHIPPED -> DELIVERED
 curl -s -X POST http://localhost:8080/orders/$ORDER_ID/workflow/transitions \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"triggerType":"EVENT","triggerCode":"shipment.dispatched"}'
 curl -s -X POST http://localhost:8080/orders/$ORDER_ID/workflow/transitions \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"triggerType":"EVENT","triggerCode":"shipment.delivered"}'
 
-curl -s http://localhost:8080/orders/$ORDER_ID | python3 -m json.tool   # status: DELIVERED
+curl -s -H "X-Tenant-Id: default" http://localhost:8080/orders/$ORDER_ID | python3 -m json.tool   # status: DELIVERED
 ```
 
 **High-value order** (guard fires, lands in `CREDIT_REVIEW`, needs a human decision):
 
 ```bash
 ORDER_ID=$(curl -s -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"orderTypeCode":"STANDARD","customerRef":"cust-2","currency":"USD","totalAmount":"5000.00"}' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['orderId'])")
 
 # CREATED -> PAYMENT_PENDING -> CREDIT_REVIEW (guard fires immediately, no payment.captured needed)
 curl -s -X POST http://localhost:8080/orders/$ORDER_ID/workflow/transitions \
-  -H "Content-Type: application/json" -H "X-User-Id: dev" \
+  -H "Content-Type: application/json" -H "X-User-Id: dev" -H "X-Tenant-Id: default" \
   -d '{"triggerType":"EVENT","triggerCode":"order.submitted"}'
 
 # Find the task it created
-TASK=$(curl -s "http://localhost:8080/tasks?status=UNASSIGNED&assigneeGroup=credit-team")
+TASK=$(curl -s -H "X-Tenant-Id: default" "http://localhost:8080/tasks?status=UNASSIGNED&assigneeGroup=credit-team")
 TASK_ID=$(echo "$TASK" | python3 -c "import json,sys; print(json.load(sys.stdin)['content'][0]['taskId'])")
 
 # Claim it (If-Match is the task's current version — 0 for a fresh task)
 curl -s -X POST http://localhost:8080/tasks/$TASK_ID/claim \
-  -H "If-Match: 0" -H "X-User-Id: reviewer-1"
+  -H "If-Match: 0" -H "X-User-Id: reviewer-1" -H "X-Tenant-Id: default"
 
 # Approve (version is now 1 after the claim) -> fires TASK_APPROVED -> FULFILLMENT_QUEUED
 curl -s -X POST http://localhost:8080/tasks/$TASK_ID/approve \
-  -H "Content-Type: application/json" -H "If-Match: 1" -H "X-User-Id: reviewer-1" \
+  -H "Content-Type: application/json" -H "If-Match: 1" -H "X-User-Id: reviewer-1" -H "X-Tenant-Id: default" \
   -d '{"comment":"looks fine"}'
 ```
 
@@ -95,7 +101,7 @@ blank reason at the API level, not just in the UI.
 
 ```bash
 curl -s -i -X PATCH http://localhost:8080/orders/$ORDER_ID \
-  -H "Content-Type: application/json" -H "If-Match: 999" \
+  -H "Content-Type: application/json" -H "If-Match: 999" -H "X-Tenant-Id: default" \
   -d '{"customerRef":"new-ref"}' | head -1   # HTTP/1.1 409
 ```
 
@@ -125,7 +131,7 @@ This is SPEC.md §3.3's core promise: new custom fields are a data change
 
 ```bash
 curl -s -X PATCH http://localhost:8080/order-types/STANDARD \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Tenant-Id: default" \
   -d '{
     "attributeSchema": {
       "type": "object",
@@ -174,7 +180,7 @@ Via the API:
 
 ```bash
 curl -s -X POST http://localhost:8080/order-types \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Tenant-Id: default" \
   -d '{
     "code": "EXPRESS",
     "name": "Express Order",
@@ -219,7 +225,7 @@ underlying model — SPEC.md §4.1–§4.3):
 
 ```bash
 curl -s -i -X PUT http://localhost:8080/order-types/EXPRESS/workflow \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Tenant-Id: default" \
   -d '{
     "name": "Express Workflow v1",
     "states": [
@@ -281,3 +287,65 @@ backstop.
   time and never moves, even after a newer version is published — so
   changing a workflow can't retroactively change behavior for an order
   that's already mid-flight.
+
+---
+
+## 4. Multi-tenancy
+
+See SPEC.md §10 for the design. The practical bits:
+
+### 4.1 Registering a new tenant
+
+**There's no API for this yet** — `tenant` is a plain registry table with no
+controller in front of it. Insert directly:
+
+```bash
+docker compose exec postgres psql -U oms -d oms \
+  -c "INSERT INTO tenant (tenant_id, name) VALUES ('acme', 'Acme Corp');"
+```
+
+`default` is seeded by `V4__add_multi_tenancy.sql` and is what every other
+example in this guide uses.
+
+### 4.2 Every request needs `X-Tenant-Id`
+
+Omit it and the API returns `400`; send a `tenant_id` with no matching row in
+`tenant` and it returns `404`:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/order-types                       # 400
+curl -s -o /dev/null -w "%{http_code}\n" -H "X-Tenant-Id: ghost-corp" http://localhost:8080/order-types  # 404
+curl -s -o /dev/null -w "%{http_code}\n" -H "X-Tenant-Id: default" http://localhost:8080/order-types     # 200
+```
+
+### 4.3 Seeing isolation in practice
+
+Two tenants can register the same order-type `code` independently, and
+neither sees the other's data:
+
+```bash
+curl -s -X POST http://localhost:8080/order-types -H "X-Tenant-Id: acme" -H "Content-Type: application/json" -d '{
+  "code": "STANDARD",
+  "name": "Acme Standard Order",
+  "attributeSchema": {"type":"object","properties":{}},
+  "lineAttributeSchema": {"type":"object","properties":{}}
+}'
+
+curl -s -H "X-Tenant-Id: default" http://localhost:8080/order-types | python3 -c "import json,sys; print([o['code'] for o in json.load(sys.stdin)])"
+curl -s -H "X-Tenant-Id: acme"    http://localhost:8080/order-types | python3 -c "import json,sys; print([o['code'] for o in json.load(sys.stdin)])"
+```
+
+`default`'s list includes its own `STANDARD` (and anything else seeded for
+it); `acme`'s list includes only the `STANDARD` just created for `acme` — the
+two never overlap, because every query Hibernate runs against a tenant-owned
+entity (`order_type` included) carries an implicit `tenant_id = ?` filter
+(SPEC.md §10).
+
+### 4.4 In the frontend
+
+`web/src/lib/api.ts` sends `X-Tenant-Id` on every call, resolved the same way
+as the acting user (`getActingTenant()` / `setActingTenant()`, backed by
+`localStorage`, default `'default'`). **There's no tenant-switcher UI yet** —
+to act as a different tenant in the browser, run
+`localStorage.setItem('oms.actingTenant', 'acme')` in the devtools console
+and reload.

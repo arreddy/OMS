@@ -10,6 +10,7 @@ import com.oms.repository.DomainEventRepository;
 import com.oms.service.OrderTypeService.PublishWorkflowCommand;
 import com.oms.service.OrderTypeService.StateSpec;
 import com.oms.service.OrderTypeService.TransitionSpec;
+import com.oms.tenant.TenantContext;
 import com.oms.web.dto.OrderDtos.CreateOrderRequest;
 import com.oms.web.dto.OrderDtos.OrderResponse;
 import com.oms.web.dto.OrderDtos.UpdateOrderRequest;
@@ -20,6 +21,9 @@ import com.oms.web.dto.TaskDtos.RejectRequest;
 import com.oms.web.dto.TaskDtos.TaskResponse;
 import com.oms.web.dto.WorkflowDtos.FireTransitionRequest;
 import com.oms.web.dto.WorkflowDtos.WorkflowInstanceResponse;
+import jakarta.annotation.PostConstruct;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -27,6 +31,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
+import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -59,6 +64,33 @@ class OrderWorkflowIT {
 
     @Autowired
     private DomainEventRepository domainEventRepository;
+
+    /** Every request in this test targets the seeded 'default' tenant (V4 migration). */
+    @PostConstruct
+    void addTenantHeaderInterceptor() {
+        List<ClientHttpRequestInterceptor> interceptors = rest.getRestTemplate().getInterceptors();
+        if (interceptors.isEmpty()) {
+            interceptors.add((request, body, execution) -> {
+                request.getHeaders().set("X-Tenant-Id", "default");
+                return execution.execute(request, body);
+            });
+        }
+    }
+
+    /**
+     * Repository calls made directly from the test (bypassing TenantFilter,
+     * which only runs for requests through `rest`) need TenantContext set on
+     * the test's own thread too, since @TenantId queries resolve it per-thread.
+     */
+    @BeforeEach
+    void setTenantContext() {
+        TenantContext.set("default");
+    }
+
+    @AfterEach
+    void clearTenantContext() {
+        TenantContext.clear();
+    }
 
     @Test
     void lowAmountOrder_progressesAutomaticallyToDeliveredWithoutCreditReview() {
