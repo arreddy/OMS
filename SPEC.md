@@ -69,6 +69,13 @@ A standalone OMS with:
 
 **How extension works:** adding a new order type or new custom fields means inserting/updating a row here — no DDL, no deploy. `attribute_schema` is enforced at the API layer on create/update. Consumers can `GET /order-types/{code}/schema` to introspect available fields instead of hardcoding them client-side.
 
+**`order_type` is not versioned — only `workflow_definition` is.** `PATCH /order-types/{code}` updates `attribute_schema` and `line_attribute_schema` in place; there is no history of prior schema versions. This is an intentional asymmetry:
+
+- Workflow versioning exists because in-flight orders must keep running on the graph they started with — changing a state or transition mid-flight would silently alter live order behavior. A `workflow_instance` therefore pins `workflow_definition_id` at creation (§4.4).
+- Attribute schema versioning does not exist because orders store their `attributes` JSON directly, not a pointer to "which schema validated me." Existing `order.attributes` rows are never retroactively re-validated when the schema changes (§6, `PATCH /order-types/{code}`) — the schema is only enforced at write time going forward. There is therefore no runtime need for pinning.
+
+The practical gap: if a `required` field is added to `attribute_schema` today, there is no record of what schema was in effect when an older order was created, and no way to distinguish "was valid under the old schema" from "was never valid." If audit-grade schema history is needed in the future, the natural extension is to version `attribute_schema` as an immutable side-table (mirroring `workflow_definition`) and store a schema-version FK on `order` at creation time — but that is out of scope for the current model.
+
 ---
 
 ## 4. Workflow Engine Model
